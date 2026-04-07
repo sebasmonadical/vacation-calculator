@@ -613,6 +613,13 @@
           </div>
         </div>
         <div class="field-group">
+          <div class="field-label">Total Vacation Days</div>
+          <div class="field-display empty" id="disp-total_vacation_days">
+            <span class="fd-value">—</span>
+            <span class="fd-actions"></span>
+          </div>
+        </div>
+        <div class="field-group">
           <div class="field-label">Days Used</div>
           <div class="field-display empty" id="disp-vacation_days_used">
             <span class="fd-value">—</span>
@@ -1463,6 +1470,34 @@ function updateAllExtractedFields() {
   ];
   for (const { id, fmt } of fields) {
     renderExtractedField(id, getEffectiveValue(id), getValueSource(id), fmt);
+  }
+  updateTotalVacationDays();
+}
+
+/**
+ * updateTotalVacationDays()
+ * Derived field: Total Vacation Days = Allocated Days + Roll Over Days.
+ * Always computed — not extracted from PDF, not overridable.
+ */
+function updateTotalVacationDays() {
+  const el = document.getElementById('disp-total_vacation_days');
+  if (!el) return;
+  const accrued  = parseFloat(getEffectiveValue('vacation_days_accrued'));
+  const rollOver = parseFloat(getEffectiveValue('roll_over_days'));
+  const hasAccrued  = !isNaN(accrued);
+  const hasRollOver = !isNaN(rollOver);
+  if (hasAccrued || hasRollOver) {
+    const total = (hasAccrued ? accrued : 0) + (hasRollOver ? rollOver : 0);
+    const formula = `${hasAccrued ? fmtNum(accrued,1) : '0'} allocated + ${hasRollOver ? fmtNum(rollOver,1) : '0'} rollover`;
+    el.classList.remove('empty');
+    el.querySelector('.fd-value').innerHTML = `${fmtNum(total,1)} days`;
+    el.querySelector('.fd-actions').innerHTML =
+      `<span style="font-size:11px;color:var(--c-muted);">${formula}</span>
+       ${badgeHTML('derived')}`;
+  } else {
+    el.classList.add('empty');
+    el.querySelector('.fd-value').innerHTML = '—';
+    el.querySelector('.fd-actions').innerHTML = '';
   }
 }
 
