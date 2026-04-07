@@ -1,0 +1,2136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vacation &amp; Final Payment Calculator</title>
+  <!--
+  ================================================================
+  VACATION & FINAL PAYMENT CALCULATOR
+  ================================================================
+  PURPOSE : Deterministic, rule-based payroll calculation tool.
+            NO AI is used for calculations — all logic is explicit,
+            traceable, and auditable.
+
+  MODULES :
+    1. PDF Parser         — parseVacationPdf(), buildTextFromItems(),
+                            extractFieldsFromText(), normalizeFields()
+    2. Validation         — validateInputs()
+    3. Calculation Engine — calculateDailyRate(), calculateWorkedDaysValue(),
+                            calculatePayInLieu(), deriveVacationRemaining(),
+                            calculateVacationPayout(), calculateFinalPayment()
+    4. Formatting         — formatCurrencyCAD(), formatDate()
+    5. UI Layer           — renderExtractedField(), renderWarnings(),
+                            renderResults(), override modal
+
+  CONSTANT:
+    NOTICE_WORKING_DAYS = 10
+
+  ----------------------------------------------------------------
+  EXAMPLE PARSED JSON (from PDF):
+  {
+    "employee_name":           "John Doe",
+    "start_date":              "2019-06-01",
+    "end_date":                "2024-03-31",
+    "vacation_days_accrued":   15,
+    "roll_over_days":          3,
+    "vacation_days_used":      10,
+    "vacation_days_remaining": 8,
+    "renewal_date":            "2024-06-01"
+  }
+
+  ----------------------------------------------------------------
+  EXAMPLE CALCULATION:
+    Salary:                  $5,500.00 / month
+    Working days in month:   21
+    Worked days (final):     8
+    Pay in lieu:             Yes
+
+    daily_rate        = 5500 / 21           = $261.90
+    worked_days_value = 8    × $261.90      = $2,095.24
+    pay_in_lieu_value = 10   × $261.90      = $2,619.05  (NOTICE_WORKING_DAYS = 10)
+    vacation_payout   = 8    × $261.90      = $2,095.24  (days_remaining = 8, from PDF)
+    final_payment     = $2,095.24 + $2,619.05 + $2,095.24 = $6,809.52
+
+  ----------------------------------------------------------------
+  HOW TO MODIFY FORMULAS:
+    • Daily rate basis    — change calculateDailyRate() (e.g., use annual / 260)
+    • Notice period days  — change NOTICE_WORKING_DAYS constant (default 10)
+    • Vacation payout     — change calculateVacationPayout() (e.g., multiply by 4%)
+    • Final payment       — change calculateFinalPayment() to add/remove components
+    • Validation rules    — change validateInputs() thresholds and checks
+
+  ================================================================
+  -->
+
+  <!-- PDF.js — used ONLY for text extraction from uploaded PDFs -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+  <style>
+    /* ============================================================
+       RESET & CSS VARIABLES
+       ============================================================ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --c-primary:        #1a56db;
+      --c-primary-hover:  #1e429f;
+      --c-primary-light:  #eff6ff;
+      --c-success-bg:     #f0fdf4;
+      --c-success-border: #bbf7d0;
+      --c-success-text:   #166534;
+      --c-warn-bg:        #fffbeb;
+      --c-warn-border:    #fcd34d;
+      --c-warn-text:      #92400e;
+      --c-error-bg:       #fef2f2;
+      --c-error-border:   #fca5a5;
+      --c-error-text:     #991b1b;
+      --c-bg:             #f9fafb;
+      --c-surface:        #ffffff;
+      --c-border:         #d1d5db;
+      --c-text:           #111827;
+      --c-muted:          #6b7280;
+      --c-subtle:         #f3f4f6;
+
+      /* Source badge colours */
+      --c-pdf:            #6d28d9;
+      --c-pdf-bg:         #ede9fe;
+      --c-manual:         #0369a1;
+      --c-manual-bg:      #e0f2fe;
+      --c-derived:        #065f46;
+      --c-derived-bg:     #d1fae5;
+      --c-override:       #b45309;
+      --c-override-bg:    #fef3c7;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--c-bg);
+      color: var(--c-text);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    /* ============================================================
+       LAYOUT
+       ============================================================ */
+    .app-header {
+      background: var(--c-primary);
+      color: #fff;
+      padding: 18px 24px;
+    }
+    .app-header h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+    .app-header p  { font-size: 13px; opacity: 0.85; margin-top: 3px; }
+
+    .container {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 24px 16px 40px;
+    }
+
+    /* ============================================================
+       CARDS
+       ============================================================ */
+    .card {
+      background: var(--c-surface);
+      border: 1px solid var(--c-border);
+      border-radius: 10px;
+      margin-bottom: 20px;
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 12px 18px;
+      background: var(--c-subtle);
+      border-bottom: 1px solid var(--c-border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .card-header h2 { font-size: 15px; font-weight: 600; }
+    .step-badge {
+      width: 24px; height: 24px;
+      background: var(--c-primary);
+      color: #fff;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700;
+      flex-shrink: 0;
+    }
+    .step-badge.done  { background: var(--c-success-text); }
+    .step-badge.warn  { background: var(--c-warn-text); }
+    .card-body { padding: 18px; }
+
+    /* ============================================================
+       UPLOAD ZONE
+       ============================================================ */
+    .upload-zone {
+      border: 2px dashed var(--c-border);
+      border-radius: 8px;
+      padding: 36px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      background: var(--c-bg);
+    }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: var(--c-primary);
+      background: var(--c-primary-light);
+    }
+    .upload-zone .uz-icon  { font-size: 36px; margin-bottom: 10px; }
+    .upload-zone .uz-title { font-weight: 600; color: var(--c-primary); }
+    .upload-zone .uz-sub   { font-size: 12px; color: var(--c-muted); margin-top: 6px; }
+    #pdfFileInput { display: none; }
+
+    /* ============================================================
+       GRID
+       ============================================================ */
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+    @media (max-width: 640px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+
+    /* ============================================================
+       FIELD COMPONENTS
+       ============================================================ */
+    .field-group { display: flex; flex-direction: column; gap: 5px; }
+
+    .field-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--c-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .required-star { color: #dc2626; }
+
+    /* Read-only display for PDF-extracted fields */
+    .field-display {
+      min-height: 38px;
+      padding: 7px 10px;
+      background: var(--c-bg);
+      border: 1px solid var(--c-border);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 14px;
+    }
+    .field-display.empty { color: var(--c-muted); font-style: italic; }
+    .field-display .fd-value { font-weight: 500; flex: 1; }
+    .field-display .fd-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+
+    /* Manual input fields */
+    .field-input {
+      padding: 8px 10px;
+      border: 1px solid var(--c-border);
+      border-radius: 6px;
+      font-size: 14px;
+      width: 100%;
+      background: #fff;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .field-input:focus {
+      outline: none;
+      border-color: var(--c-primary);
+      box-shadow: 0 0 0 3px rgba(26,86,219,0.12);
+    }
+    textarea.field-input { resize: vertical; }
+
+    /* ============================================================
+       SOURCE BADGES
+       ============================================================ */
+    .badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .badge-pdf      { background: var(--c-pdf-bg);      color: var(--c-pdf); }
+    .badge-manual   { background: var(--c-manual-bg);   color: var(--c-manual); }
+    .badge-derived  { background: var(--c-derived-bg);  color: var(--c-derived); }
+    .badge-override { background: var(--c-override-bg); color: var(--c-override); }
+
+    /* ============================================================
+       BUTTONS
+       ============================================================ */
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 18px;
+      border-radius: 7px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-primary   { background: var(--c-primary); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: var(--c-primary-hover); }
+
+    .btn-secondary { background: #fff; color: var(--c-text); border: 1px solid var(--c-border); }
+    .btn-secondary:hover:not(:disabled) { background: var(--c-subtle); }
+
+    .btn-danger    { background: #fff; color: #dc2626; border: 1px solid var(--c-error-border); }
+    .btn-danger:hover:not(:disabled) { background: var(--c-error-bg); }
+
+    .btn-ghost {
+      font-size: 11px;
+      padding: 2px 8px;
+      border: 1px solid var(--c-border);
+      border-radius: 4px;
+      background: #fff;
+      cursor: pointer;
+      color: var(--c-muted);
+      transition: all 0.15s;
+    }
+    .btn-ghost:hover { border-color: var(--c-override); color: var(--c-override); }
+
+    /* ============================================================
+       STATUS BARS
+       ============================================================ */
+    .status-bar {
+      display: flex; align-items: flex-start; gap: 9px;
+      padding: 11px 14px;
+      border-radius: 7px;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+    .status-info    { background: var(--c-primary-light); border: 1px solid #bfdbfe; color: #1e40af; }
+    .status-success { background: var(--c-success-bg);    border: 1px solid var(--c-success-border); color: var(--c-success-text); }
+    .status-warn    { background: var(--c-warn-bg);       border: 1px solid var(--c-warn-border);    color: var(--c-warn-text); }
+    .status-error   { background: var(--c-error-bg);      border: 1px solid var(--c-error-border);   color: var(--c-error-text); }
+    .status-bar .sb-icon { flex-shrink: 0; font-size: 15px; }
+
+    /* ============================================================
+       SECTION DIVIDER
+       ============================================================ */
+    .section-sep {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--c-muted);
+      padding-bottom: 8px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--c-border);
+    }
+
+    /* ============================================================
+       WARNINGS LIST
+       ============================================================ */
+    .warn-list { display: flex; flex-direction: column; gap: 8px; }
+    .warn-item {
+      display: flex; gap: 9px; align-items: flex-start;
+      padding: 10px 13px;
+      border-radius: 7px;
+      font-size: 13px;
+    }
+    .warn-item.wi-warn  { background: var(--c-warn-bg);  border: 1px solid var(--c-warn-border);  color: var(--c-warn-text); }
+    .warn-item.wi-error { background: var(--c-error-bg); border: 1px solid var(--c-error-border); color: var(--c-error-text); }
+    .warn-item .wi-icon { flex-shrink: 0; }
+
+    /* ============================================================
+       RESULTS TABLE
+       ============================================================ */
+    .res-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    .res-table thead tr {
+      background: var(--c-subtle);
+    }
+    .res-table th {
+      text-align: left;
+      padding: 9px 13px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--c-muted);
+      border-bottom: 1px solid var(--c-border);
+    }
+    .res-table td {
+      padding: 10px 13px;
+      border-bottom: 1px solid #f3f4f6;
+      vertical-align: middle;
+    }
+    .res-table tr:last-child td { border-bottom: none; }
+    .res-table .td-label  { color: var(--c-muted); }
+    .res-table .td-amount { font-weight: 600; text-align: right; white-space: nowrap; }
+    .res-table .td-source { text-align: center; }
+    .res-table .tr-group td {
+      background: var(--c-subtle);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--c-muted);
+      padding: 6px 13px;
+    }
+    .res-table .tr-total td {
+      background: var(--c-primary-light);
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--c-primary);
+      padding: 12px 13px;
+    }
+
+    /* ============================================================
+       AUDIT TRAIL BOX
+       ============================================================ */
+    .audit-box {
+      margin-top: 16px;
+      padding: 14px 16px;
+      background: var(--c-success-bg);
+      border: 1px solid var(--c-success-border);
+      border-radius: 8px;
+      font-size: 13px;
+      color: var(--c-success-text);
+      line-height: 1.8;
+    }
+    .audit-box strong { font-family: 'Courier New', monospace; }
+
+    /* ============================================================
+       RAW TEXT VIEWER
+       ============================================================ */
+    .raw-toggle {
+      font-size: 12px;
+      color: var(--c-primary);
+      background: none;
+      border: none;
+      cursor: pointer;
+      text-decoration: underline;
+      padding: 0;
+      margin-top: 10px;
+      display: block;
+    }
+    .raw-text {
+      margin-top: 8px;
+      padding: 12px;
+      background: var(--c-bg);
+      border: 1px solid var(--c-border);
+      border-radius: 7px;
+      font-size: 11px;
+      font-family: 'Courier New', Courier, monospace;
+      white-space: pre-wrap;
+      max-height: 220px;
+      overflow-y: auto;
+      color: var(--c-muted);
+      display: none;
+    }
+
+    /* ============================================================
+       CHECKBOX
+       ============================================================ */
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 12px;
+      border: 1px solid var(--c-border);
+      border-radius: 6px;
+      cursor: pointer;
+      background: #fff;
+    }
+    .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; flex-shrink: 0; }
+    .checkbox-row label { cursor: pointer; font-size: 14px; font-weight: 500; }
+
+    /* ============================================================
+       MODAL OVERLAY
+       ============================================================ */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.45);
+      z-index: 999;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-box {
+      background: #fff;
+      border-radius: 12px;
+      padding: 26px;
+      width: 380px;
+      max-width: 95vw;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+    }
+    .modal-box h3 { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+    .modal-box p  { font-size: 13px; color: var(--c-muted); margin-bottom: 16px; }
+
+    /* ============================================================
+       DISCLAIMER
+       ============================================================ */
+    .disclaimer {
+      background: var(--c-subtle);
+      border: 1px solid var(--c-border);
+      border-radius: 8px;
+      padding: 13px 16px;
+      font-size: 12px;
+      color: var(--c-muted);
+      margin-top: 20px;
+      line-height: 1.6;
+    }
+
+    /* ============================================================
+       UTILITIES
+       ============================================================ */
+    .hidden  { display: none !important; }
+    .mt-8    { margin-top: 8px; }
+    .mt-14   { margin-top: 14px; }
+    .mb-14   { margin-bottom: 14px; }
+    .text-muted { color: var(--c-muted); }
+
+    /* ============================================================
+       PRINT STYLES
+       ============================================================ */
+    @media print {
+      .no-print  { display: none !important; }
+      .card      { break-inside: avoid; }
+      body       { background: #fff; }
+      .container { padding: 0; }
+    }
+  </style>
+</head>
+
+<body>
+
+<!-- ============================================================
+     APP HEADER
+     ============================================================ -->
+<header class="app-header">
+  <h1>Vacation &amp; Final Payment Calculator</h1>
+  <p>Deterministic, rule-based payroll calculations &mdash; all logic is explicit and auditable</p>
+</header>
+
+<div class="container">
+
+  <!-- ============================================================
+       STEP 1 · PDF UPLOAD
+       ============================================================ -->
+  <div class="card" id="card-upload">
+    <div class="card-header">
+      <div class="step-badge" id="badge-upload">1</div>
+      <h2>Upload Vacation Report PDF</h2>
+    </div>
+    <div class="card-body">
+      <div class="upload-zone no-print" id="uploadZone">
+        <div class="uz-icon">📄</div>
+        <p class="uz-title">Click to upload or drag &amp; drop</p>
+        <p class="uz-sub">PDF files only &middot; Text-based (non-scanned) PDFs work best</p>
+        <input type="file" id="pdfFileInput" accept=".pdf">
+      </div>
+
+      <div id="pdfStatus"></div>
+
+      <!-- Raw text extracted from PDF — visible for verification -->
+      <div id="rawTextContainer" class="hidden">
+        <button class="raw-toggle no-print" onclick="toggleRawText()">Show extracted raw text (for verification)</button>
+        <pre class="raw-text" id="rawTextEl"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       STEP 2 · EXTRACTED DATA
+       ============================================================ -->
+  <div class="card" id="card-extracted">
+    <div class="card-header">
+      <div class="step-badge" id="badge-extracted">2</div>
+      <h2>Extracted &amp; Vacation Data</h2>
+    </div>
+    <div class="card-body">
+      <p class="text-muted mb-14" style="font-size:13px;">
+        Fields auto-filled from the PDF are marked
+        <span class="badge badge-pdf">PDF</span>.
+        Any field can be manually overridden — overrides are flagged
+        <span class="badge badge-override">Override</span>.
+      </p>
+
+      <div class="section-sep">Employee Information</div>
+      <div class="grid-2 mb-14">
+        <div class="field-group">
+          <div class="field-label">Employee Name</div>
+          <div class="field-display empty" id="disp-employee_name">
+            <span class="fd-value">—</span>
+            <span class="fd-actions"></span>
+          </div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Renewal Date</div>
+          <div class="field-display empty" id="disp-renewal_date">
+            <span class="fd-value">—</span>
+            <span class="fd-actions"></span>
+          </div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Start Date</div>
+          <div class="field-display empty" id="disp-start_date">
+            <span class="fd-value">—</span>
+            <span class="fd-actions"></span>
+          </div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">End Date</div>
+          <div class="field-display empty" id="disp-end_date">
+            <span class="fd-value">—</span>
+            <span class="fd-actions"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-sep">Vacation Summary</div>
+      <div class="grid-3">
+        <div class="field-group">
+          <div class="field-label">Allocated Days</div>
+          <div class="field-display empty" id="disp-vacation_days_accrued">
+            <span class="fd-value">—</span>
+            <span class="fd-actions"></span>
+          </div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Roll Over Days</div>
+          <div class="field-display empty" id="disp-roll_over_days">
+            <span class="fd-value">—</span>
+            <span class="fd-actions"></span>
+          </div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Days Used</div>
+          <div class="field-display empty" id="disp-vacation_days_used">
+            <span class="fd-value">—</span>
+            <span class="fd-actions"></span>
+          </div>
+        </div>
+        <div class="field-group" style="grid-column: 1 / -1;">
+          <div class="field-label">Days Remaining</div>
+          <div class="field-display empty" id="disp-vacation_days_remaining">
+            <span class="fd-value">—</span>
+            <span class="fd-actions"></span>
+          </div>
+        </div>
+      </div>
+
+      <div id="extractionNote" class="hidden"></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       STEP 3 · MANUAL INPUTS
+       ============================================================ -->
+  <div class="card" id="card-manual">
+    <div class="card-header">
+      <div class="step-badge">3</div>
+      <h2>Manual Inputs (Payroll Data)</h2>
+    </div>
+    <div class="card-body">
+      <p class="text-muted mb-14" style="font-size:13px;">
+        These values cannot be read from the PDF. Fields marked
+        <span class="required-star">*</span> are required to calculate.
+        All values are marked <span class="badge badge-manual">Manual</span> in the results.
+      </p>
+
+      <div class="grid-2 mb-14">
+        <div class="field-group">
+          <div class="field-label">Monthly Salary (CAD) <span class="required-star">*</span></div>
+          <!-- type="text" + inputmode="numeric" so we handle formatting ourselves -->
+          <input type="text" id="inp-salary" class="field-input"
+                 inputmode="numeric" autocomplete="off"
+                 placeholder="e.g. 12,053.50">
+        </div>
+        <div class="field-group">
+          <div class="field-label">Last Day of Work <span class="required-star">*</span></div>
+          <input type="date" id="inp-last_day" class="field-input">
+        </div>
+        <div class="field-group">
+          <div class="field-label">Worked Days in Final Period <span class="required-star">*</span></div>
+          <input type="number" id="inp-worked_days" class="field-input"
+                 placeholder="e.g. 8" min="0" step="0.5">
+        </div>
+        <div class="field-group">
+          <div class="field-label">Working Days in the Month <span class="required-star">*</span></div>
+          <input type="number" id="inp-working_days" class="field-input"
+                 placeholder="e.g. 21" min="1" step="1"
+                 oninput="updateDailyRate()">
+        </div>
+      </div>
+
+      <!-- Live daily rate preview -->
+      <div id="daily-rate-preview" class="hidden mb-14"
+           style="padding: 12px 16px; background: var(--c-primary-light);
+                  border: 1px solid #bfdbfe; border-radius: 8px;
+                  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+        <span style="font-size:13px; color:#1e40af;">
+          <strong>Daily Rate</strong>
+          &nbsp;=&nbsp;
+          <span id="dr-salary" style="font-family:monospace;"></span>
+          &nbsp;÷&nbsp;
+          <span id="dr-days" style="font-family:monospace;"></span> days
+          &nbsp;=&nbsp;
+        </span>
+        <span id="dr-result"
+              style="font-size:18px; font-weight:700; color:var(--c-primary);
+                     font-family:monospace;"></span>
+        <span class="badge badge-derived" style="margin-left:auto;">derived</span>
+      </div>
+
+      <div class="field-group mb-14">
+        <div class="field-label">Pay in Lieu of Notice</div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="inp-pay_in_lieu">
+          <label for="inp-pay_in_lieu">Apply pay in lieu of notice &mdash; <strong>10 working days</strong></label>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <div class="field-label">Notes (optional)</div>
+        <textarea id="inp-notes" class="field-input" rows="2"
+                  placeholder="Additional notes to include in the output..."></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       STEP 4 · VALIDATION WARNINGS
+       ============================================================ -->
+  <div class="card hidden" id="card-warnings">
+    <div class="card-header">
+      <div class="step-badge warn" id="badge-warnings">!</div>
+      <h2>Validation Warnings</h2>
+    </div>
+    <div class="card-body">
+      <div class="warn-list" id="warnList"></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       STEP 5 · RESULTS
+       ============================================================ -->
+  <div class="card hidden" id="card-results">
+    <div class="card-header">
+      <div class="step-badge done">✓</div>
+      <h2>Final Payment Summary</h2>
+    </div>
+    <div class="card-body" id="resultBody"></div>
+  </div>
+
+  <!-- ============================================================
+       ACTION BUTTONS
+       ============================================================ -->
+  <div class="btn-row no-print" style="margin-bottom: 20px;">
+    <button class="btn btn-primary" id="btn-calc" onclick="calculate()">Calculate Final Payment</button>
+    <button class="btn btn-secondary no-print" onclick="window.print()">🖨 Print / Save PDF</button>
+    <button class="btn btn-danger no-print"     onclick="resetAll()">↺ Reset All</button>
+  </div>
+
+  <!-- DISCLAIMER -->
+  <div class="disclaimer">
+    <strong>Disclaimer:</strong> This calculator provides an estimate only. Final payments should be
+    reviewed according to applicable employment laws and company policy. All calculations are based
+    solely on the values visible in this form — no hidden logic or AI is used.
+  </div>
+
+</div><!-- /container -->
+
+
+<!-- ============================================================
+     OVERRIDE MODAL
+     ============================================================ -->
+<div class="modal-overlay" id="overrideModal">
+  <div class="modal-box">
+    <h3 id="modal-title">Override Value</h3>
+    <p id="modal-hint"></p>
+    <div class="field-group">
+      <div class="field-label" id="modal-label">Value</div>
+      <input type="text" id="modal-input" class="field-input" placeholder="">
+    </div>
+    <div class="btn-row mt-14">
+      <button class="btn btn-primary" onclick="confirmOverride()">Apply Override</button>
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" id="modal-clear-btn" onclick="clearOverride()">Clear Override</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================
+     JAVASCRIPT
+     ============================================================ -->
+<script>
+'use strict';
+
+/* ==============================================================
+   CONSTANTS
+   ============================================================== */
+
+/**
+ * Number of working days used for pay-in-lieu-of-notice.
+ * Change this value to adjust the notice period.
+ */
+const NOTICE_WORKING_DAYS = 10;
+
+/* ==============================================================
+   APPLICATION STATE
+   ============================================================== */
+
+const state = {
+  /** Data extracted from the uploaded PDF (normalized types). */
+  pdfData: {},
+
+  /**
+   * User-applied manual overrides for PDF fields.
+   * Priority: overrides > pdfData
+   */
+  overrides: {},
+
+  /** Full raw text extracted from the PDF (for user verification). */
+  pdfRawText: '',
+
+  /** Whether a successful calculation has been shown. */
+  calculated: false
+};
+
+/** The field currently being edited in the override modal. */
+let activeOverrideField = null;
+
+/* ==============================================================
+   PDF PARSING MODULE
+   ============================================================== */
+
+/**
+ * parseVacationPdf(file)
+ *
+ * Entry point for PDF processing. Uses PDF.js to extract all
+ * text from the uploaded file, then delegates to field-extraction
+ * and normalization helpers.
+ *
+ * PDF.js is used ONLY for text extraction — no AI inference.
+ *
+ * @param  {File}    file  - The PDF file selected by the user.
+ * @return {Promise<Object>} Normalized vacation data object.
+ */
+async function parseVacationPdf(file) {
+  // Set up the PDF.js worker from CDN
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+  // Collect every text item across all pages with its position
+  let allItems = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page    = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    for (const item of content.items) {
+      if (item.str && item.str.trim()) {
+        allItems.push({
+          text: item.str,
+          x:    item.transform[4],
+          y:    item.transform[5],
+          page: p
+        });
+      }
+    }
+  }
+
+  // Reconstruct logical lines from raw text items
+  const rawText = buildTextFromItems(allItems);
+  state.pdfRawText = rawText;
+
+  // Extract and normalize fields
+  const rawFields  = extractFieldsFromText(rawText);
+  return normalizeFields(rawFields);
+}
+
+/**
+ * buildTextFromItems(items)
+ *
+ * Reconstructs readable lines from individual PDF text items.
+ * Items are sorted by page then descending Y-position (PDF origin
+ * is bottom-left). Items with similar Y values are grouped into
+ * lines and sorted left-to-right by X.
+ *
+ * @param  {Array}  items - Raw items from PDF.js getTextContent()
+ * @return {string} Multi-line string representing the PDF text.
+ */
+function buildTextFromItems(items) {
+  if (!items.length) return '';
+
+  // Wider Y-tolerance handles PDFs with slightly uneven baselines
+  const Y_TOL = 5;
+
+  // Sort: page ASC, then Y DESC (top-to-bottom), then X ASC (left-to-right)
+  const sorted = [...items].sort((a, b) => {
+    if (a.page !== b.page) return a.page - b.page;
+    if (Math.abs(a.y - b.y) > Y_TOL) return b.y - a.y;
+    return a.x - b.x;
+  });
+
+  const lines  = [];
+  let curLine  = [sorted[0]];
+  let curY     = sorted[0].y;
+  let curPage  = sorted[0].page;
+
+  for (let i = 1; i < sorted.length; i++) {
+    const item     = sorted[i];
+    const sameLine = item.page === curPage && Math.abs(item.y - curY) <= Y_TOL;
+    if (sameLine) {
+      curLine.push(item);
+    } else {
+      lines.push(joinLineItems(curLine));
+      curLine = [item];
+      curY    = item.y;
+      curPage = item.page;
+    }
+  }
+  if (curLine.length) lines.push(joinLineItems(curLine));
+
+  return lines.join('\n');
+}
+
+/**
+ * joinLineItems(items)
+ *
+ * Joins text items on the same line. When the horizontal gap between
+ * consecutive items is large (>40px, typical of two-column table layouts),
+ * inserts a TAB separator so regex can distinguish "Label    Value".
+ */
+function joinLineItems(items) {
+  if (items.length === 1) return items[0].text;
+  let result = items[0].text;
+  for (let i = 1; i < items.length; i++) {
+    const gap = items[i].x - (items[i-1].x + (items[i-1].width || 0));
+    // Use tab for large gaps (column separators in tables)
+    result += (gap > 40 ? '\t' : ' ') + items[i].text;
+  }
+  return result;
+}
+
+/**
+ * extractFieldsFromText(text)
+ *
+ * Scans extracted PDF text using two strategies per field:
+ *
+ *   Strategy A — same-line:  "Label: Value"  or  "Label\tValue"
+ *   Strategy B — next-line:  "Label\n"  followed by "Value" within 3 lines
+ *
+ * This covers both inline key-value layouts and table/stacked layouts.
+ *
+ * All returned values are raw strings; normalizeFields() converts them
+ * to proper types.
+ *
+ * @param  {string} text - Full extracted PDF text (tabs mark column gaps).
+ * @return {Object} Raw string values (or null if not found).
+ */
+function extractFieldsFromText(text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+  // ── Helper A: scan full text with a regex, return capture group 1 ──────────
+  function first(patterns) {
+    for (const rx of patterns) {
+      const m = text.match(rx);
+      if (m?.[1]) return m[1].trim();
+    }
+    return null;
+  }
+
+  // ── Helper B: find a label line, then look for a value on/near it ──────────
+  // labelTests : array of regex that match a label line (standalone or inline)
+  // valueRx    : regex whose group 1 (or full match) is the value
+  // lookahead  : how many lines after the label to search
+  function findNear(labelTests, valueRx, lookahead = 3) {
+    for (let i = 0; i < lines.length; i++) {
+      if (!labelTests.some(lt => lt.test(lines[i]))) continue;
+
+      // Check same line — value appears after the label (inline)
+      const same = lines[i].match(valueRx);
+      if (same?.[1]) return same[1].trim();
+
+      // Check subsequent lines — label is on its own line, value follows
+      for (let j = i + 1; j <= Math.min(i + lookahead, lines.length - 1); j++) {
+        if (!lines[j]) continue;
+        const next = lines[j].match(valueRx);
+        if (next?.[1] ?? next?.[0]) return (next[1] ?? next[0]).trim();
+      }
+    }
+    return null;
+  }
+
+  // ── Date pattern: covers ISO, slashes, and full/abbreviated month names ────
+  const MONTHS = 'Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?';
+  const D = `(\\d{4}[-\\/]\\d{1,2}[-\\/]\\d{1,2}|(?:${MONTHS})\\s+\\d{1,2},?\\s+\\d{4}|\\d{1,2}[-\\/]\\d{1,2}[-\\/]\\d{4})`;
+  const DATE_RX = new RegExp(D, 'i');
+
+  // ── Number pattern ──────────────────────────────────────────────────────────
+  const N = '(\\d+(?:\\.\\d+)?)';
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // EMPLOYEE NAME
+  // ════════════════════════════════════════════════════════════════════════════
+  //
+  // Tries four strategies in order:
+  //  1. Explicit label + value on the same line
+  //  2. Label on its own line, name on the next line
+  //  3. Standalone "First Last" within the first 20 lines (unlabelled headers)
+  //  4. Tab-separated two-column format: "Employee Name  \t  John Smith"
+
+  // Words that must NOT appear in an employee name match — prevents false positives
+  // like "Current Year", "Previous Period", "Annual Report", etc.
+  const NAME_BLOCKLIST = /\b(?:current|previous|next|year|period|quarter|month|annual|monthly|weekly|report|vacation|summary|statement|payroll|company|inc|ltd|corp|page|date|total|balance|remaining|used|allocated|entitlement|accrued|rollover|roll|over|renewal|anniversary)\b/i;
+
+  // Post-validate a candidate name: reject if it contains blocklist words,
+  // contains digits, or is fewer than 2 words.
+  function isValidName(s) {
+    if (!s) return false;
+    if (/\d/.test(s)) return false;                    // no digits
+    if (s.trim().split(/\s+/).length < 2) return false; // must be at least 2 words
+    if (NAME_BLOCKLIST.test(s)) return false;           // no report/period words
+    return true;
+  }
+
+  let employee_name =
+    // Strategy 1 — inline: "Employee Name: John Doe"
+    // Note: "for" removed — it matches "Report for Current Year" as a false positive
+    first([
+      /(?:employee\s*name|employee)\s*[:\-]\s*([A-Za-z][A-Za-z '.,-]{2,50}?)(?:\s{2,}|\t|\n|$)/i,
+      /(?:^|\n|\t)name\s*[:\-]\s*([A-Za-z][A-Za-z '.,-]{2,50}?)(?:\s{2,}|\t|\n|$)/im,
+      /(?:prepared\s+for|report\s+for|vacation\s+report\s+for)\s*[:\-]?\s*([A-Za-z][A-Za-z '.,-]{2,40}?)(?:\s{2,}|\t|\n|$)/i,
+    ]) ||
+    // Strategy 2 — stacked: label on its own line, name on next line
+    // "for" removed from label tests — too generic, causes false matches
+    findNear(
+      [
+        /^employee\s*(?:name)?\s*[:\-]?\s*$/i,
+        /^name\s*[:\-]?\s*$/i,
+        /^prepared\s+for\s*[:\-]?\s*$/i,
+      ],
+      /^([A-Z][a-z]+(?:[\s\-'][A-Za-z][a-z]+){1,4})\s*$/,
+      2
+    ) ||
+    // Strategy 3 — standalone "First Last" in the first 20 lines (unlabelled header)
+    // Extended blocklist prevents period/section headers being matched
+    (() => {
+      for (const line of lines.slice(0, 20)) {
+        const m = line.match(/^([A-Z][a-z]+(?:\s[A-Z][a-z'-]+){1,3})\s*$/);
+        if (m && isValidName(m[1])) return m[1];
+      }
+      return null;
+    })() ||
+    // Strategy 4 — tab-separated two-column: "Employee Name \t John Doe"
+    first([
+      /(?:employee\s*name|employee)\s*\t\s*([A-Za-z][A-Za-z '.,-]{2,50}?)(?:\t|\n|$)/i,
+      /(?:^|\n)name\s*\t\s*([A-Za-z][A-Za-z '.,-]{2,50}?)(?:\t|\n|$)/im,
+    ]);
+
+  // Final guard: if the extracted name still fails validation, discard it
+  // so the UI prompts manual entry instead of showing garbage
+  if (!isValidName(employee_name)) employee_name = null;
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // START DATE
+  // Handles: explicit labels, stacked labels, "From: date", "Period: date – date"
+  // ════════════════════════════════════════════════════════════════════════════
+  let start_date =
+    first([
+      // Explicit label on same line
+      new RegExp('(?:start\\s*date|hire\\s*date|date\\s*of\\s*hire|employment\\s*(?:start|date|commencement)|commencement\\s*date|joining\\s*date|seniority\\s*date)\\s*[:\\-]?[\\s\\t]*' + D, 'i'),
+      // "From: date" or "From date"
+      new RegExp('(?:^|\\n)from\\s*[:\\-]\\s*' + D, 'im'),
+      // "Period: date – date" or "Period: date to date"  → take the first date as start
+      new RegExp('(?:period|date\\s*range|coverage)\\s*[:\\-]?\\s*' + D, 'i'),
+      // Tab-separated two-column
+      new RegExp('(?:start\\s*date|hire\\s*date|date\\s*of\\s*hire)\\s*\\t\\s*' + D, 'i'),
+    ]) ||
+    findNear(
+      [
+        /^(?:start\s*date|hire\s*date|date\s*of\s*hire|employment\s*(?:start|date|commencement)|commencement\s*date|joining\s*date|seniority\s*date)\s*[:\-]?\s*$/i,
+        /^from\s*[:\-]?\s*$/i,
+        /^period\s*[:\-]?\s*$/i,
+      ],
+      DATE_RX
+    );
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // END DATE
+  // Handles: explicit labels, stacked labels, "To: date", range second date
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // Helper: extract the SECOND date from a "date – date" or "date to date" range
+  const RANGE_RX = new RegExp(D + '\\s*(?:to|–|—|-)\\s*' + D, 'i');
+
+  let end_date =
+    first([
+      // Explicit label on same line
+      new RegExp('(?:end\\s*date|termination\\s*date|last\\s*(?:day|date)(?:\\s*(?:of\\s*(?:employment|work)|worked))?|separation\\s*date|departure\\s*date|cessation\\s*date)\\s*[:\\-]?[\\s\\t]*' + D, 'i'),
+      // "To: date"
+      new RegExp('(?:^|\\n)to\\s*[:\\-]\\s*' + D, 'im'),
+      // Tab-separated two-column
+      new RegExp('(?:end\\s*date|termination\\s*date)\\s*\\t\\s*' + D, 'i'),
+    ]) ||
+    // Second date in a "from date – to date" range expression
+    (() => {
+      const m = text.match(RANGE_RX);
+      return m?.[2] ? m[2].trim() : null;
+    })() ||
+    findNear(
+      [
+        /^(?:end\s*date|termination\s*date|last\s*(?:day|date)|separation\s*date|departure\s*date|cessation\s*date)\s*[:\-]?\s*$/i,
+        /^to\s*[:\-]?\s*$/i,
+      ],
+      DATE_RX
+    );
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // VACATION FIELDS
+  // ════════════════════════════════════════════════════════════════════════════
+  return {
+    employee_name: employee_name || null,
+    start_date:    start_date    || null,
+    end_date:      end_date      || null,
+
+    vacation_days_accrued: first([
+      // Common inline labels
+      new RegExp('(?:vacation\\s*days?\\s*(?:allocated|accrued|entitlement)|days?\\s*allocated|days?\\s*accrued)\\s*[:\\-]?[\\s\\t]*' + N, 'i'),
+      new RegExp('(?:annual\\s*(?:vacation\\s*)?entitlement|vacation\\s*entitlement|entitlement)\\s*[:\\-]?[\\s\\t]*' + N, 'i'),
+      new RegExp('(?:allocated|accrued)\\s*[:\\-]?[\\s\\t]*' + N, 'i'),
+      new RegExp('(?:total\\s*(?:vacation\\s*)?days?|total\\s*entitlement)\\s*[:\\-]?[\\s\\t]*' + N, 'i'),
+      // Tab-separated column formats (label \t value)
+      new RegExp('(?:allocated|accrued|entitlement)\\s*\\t\\s*' + N, 'i'),
+      // Some systems label this column "Current Year" and the value follows
+      new RegExp('current\\s*year\\s*[:\\-]?\\s*' + N, 'i'),
+    ]) ||
+    // Stacked layout: label line then value line
+    findNear(
+      [/^(?:allocated|accrued|entitlement|vacation\s*entitlement|annual\s*entitlement)\s*[:\-]?\s*$/i],
+      new RegExp('^\\s*' + N + '\\s*$')
+    ) || null,
+
+    roll_over_days: first([
+      new RegExp('(?:roll\\s*[-_]?\\s*over|rollover|carried?\\s*(?:over|forward)|carry\\s*forward|previous\\s*balance)\\s*[:\\-]?[\\s\\t]*' + N, 'i'),
+    ]),
+
+    vacation_days_used: first([
+      new RegExp('(?:days?\\s*used|vacation\\s*used|used\\s*days?|days?\\s*taken|taken|consumed)\\s*[:\\-]?[\\s\\t]*' + N, 'i'),
+    ]),
+
+    vacation_days_remaining: first([
+      new RegExp('(?:days?\\s*remaining|vacation\\s*remaining|remaining\\s*days?|current\\s*balance|outstanding\\s*balance|available\\s*days?|closing\\s*balance|balance)\\s*[:\\-]?[\\s\\t]*' + N, 'i'),
+    ]),
+
+    renewal_date: first([
+      new RegExp('(?:renewal\\s*date|anniversary\\s*date|next\\s*renewal|renew(?:s|al)?)\\s*[:\\-]?[\\s\\t]*' + D, 'i'),
+    ]),
+  };
+}
+
+/**
+ * normalizeFields(raw)
+ *
+ * Converts raw extracted strings into typed values.
+ * Numbers become JS numbers; dates become ISO strings (YYYY-MM-DD).
+ * Invalid or missing values become null so the UI can prompt for input.
+ *
+ * @param  {Object} raw - Output of extractFieldsFromText()
+ * @return {Object} Typed, normalized vacation data.
+ */
+function normalizeFields(raw) {
+  const norm = {};
+
+  // String fields
+  norm.employee_name = raw.employee_name
+    ? raw.employee_name.replace(/\s+/g, ' ').trim()
+    : null;
+
+  // Numeric fields — parse as float, null if NaN
+  for (const f of ['vacation_days_accrued','roll_over_days','vacation_days_used','vacation_days_remaining']) {
+    const v = parseFloat(raw[f]);
+    norm[f] = isNaN(v) ? null : v;
+  }
+
+  // Date fields — parse to ISO string
+  for (const f of ['start_date','end_date','renewal_date']) {
+    norm[f] = parseFlexibleDate(raw[f]);
+  }
+
+  return norm;
+}
+
+/**
+ * parseFlexibleDate(str)
+ *
+ * Converts common date string formats found in PDFs to ISO YYYY-MM-DD.
+ * Returns null if the string cannot be parsed.
+ *
+ * Supported formats: YYYY-MM-DD, YYYY/MM/DD, MM/DD/YYYY, DD-MM-YYYY,
+ * "January 15, 2024", "Jan 15 2024", and any format Date() accepts.
+ */
+function parseFlexibleDate(str) {
+  if (!str) return null;
+  str = str.trim();
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;                          // ISO
+  if (/^\d{4}\/\d{2}\/\d{2}$/.test(str)) return str.replace(/\//g, '-');     // YYYY/MM/DD
+
+  const slashMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);           // MM/DD/YYYY
+  if (slashMatch) {
+    const [, m, d, y] = slashMatch;
+    return `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+  }
+
+  const dashMatch = str.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);              // DD-MM-YYYY
+  if (dashMatch) {
+    const [, a, b, y] = dashMatch;
+    return `${y}-${a.padStart(2,'0')}-${b.padStart(2,'0')}`;
+  }
+
+  const d = new Date(str);                                                    // Natural language
+  if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
+
+  return null;
+}
+
+/* ==============================================================
+   VALIDATION MODULE
+   ============================================================== */
+
+/**
+ * validateInputs(data)
+ *
+ * Performs all validation checks against the resolved input values.
+ * Returns an array of issue objects with:
+ *   { type: 'error' | 'warn', message: string }
+ *
+ * Rules:
+ *   Errors   — block calculation; required fields missing or invalid.
+ *   Warnings — advisory only; calculation proceeds but user is informed.
+ *
+ * @param  {Object} data - Resolved input values.
+ * @return {Array}  Array of issue objects.
+ */
+function validateInputs(data) {
+  const issues = [];
+  const { salary, working_days, worked_days,
+          vacation_days_accrued, roll_over_days,
+          vacation_days_used, vacation_days_remaining } = data;
+
+  /* ---------- Required field errors ---------- */
+  if (!salary || salary <= 0)
+    issues.push({ type: 'error', message: 'Monthly salary is required and must be greater than $0.' });
+
+  if (!working_days || working_days <= 0)
+    issues.push({ type: 'error', message: 'Working days in the month is required and must be at least 1.' });
+
+  if (worked_days === null || isNaN(worked_days) || worked_days < 0)
+    issues.push({ type: 'error', message: 'Worked days in final period must be 0 or greater.' });
+
+  /* ---------- Vacation consistency warnings ---------- */
+  if (vacation_days_accrued !== null && vacation_days_accrued < 0)
+    issues.push({ type: 'warn', message: 'Vacation days accrued is negative — please verify the PDF data.' });
+
+  if (vacation_days_used !== null && vacation_days_accrued !== null) {
+    const available = (vacation_days_accrued || 0) + (roll_over_days || 0);
+    if (vacation_days_used > available)
+      issues.push({ type: 'warn',
+        message: `Vacation used (${vacation_days_used} days) exceeds total available (${available} days). Verify this is correct.` });
+  }
+
+  // Warn if derived remaining doesn't match PDF remaining
+  if (vacation_days_remaining !== null &&
+      vacation_days_accrued !== null) {
+    const derived = (vacation_days_accrued || 0) + (roll_over_days || 0) - (vacation_days_used || 0);
+    if (Math.abs(derived - vacation_days_remaining) > 0.01) {
+      issues.push({ type: 'warn',
+        message: `PDF remaining (${vacation_days_remaining} days) differs from calculated remaining (${derived.toFixed(1)} days = ${vacation_days_accrued} accrued + ${roll_over_days || 0} rollover − ${vacation_days_used || 0} used). The PDF value takes priority.` });
+    }
+  }
+
+  return issues;
+}
+
+/* ==============================================================
+   CALCULATION ENGINE  (pure functions — no side effects)
+   ============================================================== */
+
+/**
+ * calculateDailyRate(salary, workingDaysInMonth)
+ *
+ * Formula: daily_rate = salary / working_days_in_month
+ *
+ * This is the basis for every monetary component.
+ * To change the calculation basis (e.g. annual / 260), modify here.
+ */
+function calculateDailyRate(salary, workingDaysInMonth) {
+  return salary / workingDaysInMonth;
+}
+
+/**
+ * calculateWorkedDaysValue(workedDays, dailyRate)
+ *
+ * Formula: worked_days_value = worked_days × daily_rate
+ *
+ * Represents pay owed for the final partial pay period.
+ */
+function calculateWorkedDaysValue(workedDays, dailyRate) {
+  return workedDays * dailyRate;
+}
+
+/**
+ * calculatePayInLieu(dailyRate, applies)
+ *
+ * Formula: pay_in_lieu_value = applies ? daily_rate × NOTICE_WORKING_DAYS : 0
+ *
+ * To change the notice period, update the NOTICE_WORKING_DAYS constant above.
+ */
+function calculatePayInLieu(dailyRate, applies) {
+  return applies ? dailyRate * NOTICE_WORKING_DAYS : 0;
+}
+
+/**
+ * deriveVacationRemaining(accrued, rollOver, used, fromPdf)
+ *
+ * Priority: PDF value (if present) > derived value.
+ *
+ * Derived formula: vacation_days_remaining = accrued + roll_over − used
+ *
+ * @return {{ value: number, source: string }}
+ */
+function deriveVacationRemaining(accrued, rollOver, used, fromPdf) {
+  if (fromPdf !== null && fromPdf !== undefined) {
+    return { value: fromPdf, source: 'pdf' };
+  }
+  const value = (accrued || 0) + (rollOver || 0) - (used || 0);
+  return { value, source: 'derived' };
+}
+
+/**
+ * calculateVacationPayout(vacationDaysRemaining, dailyRate)
+ *
+ * Formula: vacation_value = vacation_days_remaining × daily_rate
+ *
+ * To use a percentage-based formula (e.g., 4% of annual earnings),
+ * replace this function's body accordingly.
+ */
+function calculateVacationPayout(vacationDaysRemaining, dailyRate) {
+  return vacationDaysRemaining * dailyRate;
+}
+
+/**
+ * calculateFinalPayment(workedDaysValue, payInLieuValue, vacationValue)
+ *
+ * Formula: final_payment = worked_days_value + pay_in_lieu_value + vacation_value
+ *
+ * To add additional components (e.g., severance, bonuses), add parameters here.
+ */
+function calculateFinalPayment(workedDaysValue, payInLieuValue, vacationValue) {
+  return workedDaysValue + payInLieuValue + vacationValue;
+}
+
+/* ==============================================================
+   FORMATTING HELPERS
+   ============================================================== */
+
+/**
+ * formatCurrencyCAD(amount)
+ * Formats a number as CAD using the en-CA locale (e.g., $5,500.00).
+ */
+function formatCurrencyCAD(amount) {
+  return new Intl.NumberFormat('en-CA', {
+    style: 'currency', currency: 'CAD',
+    minimumFractionDigits: 2, maximumFractionDigits: 2
+  }).format(amount);
+}
+
+/** Returns a number fixed to `decimals` places, or '—' for null/undefined. */
+function fmtNum(n, decimals = 2) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  return Number(n).toFixed(decimals);
+}
+
+/** Formats an ISO date string to "April 6, 2026" style. Returns null if falsy. */
+function formatDate(isoStr) {
+  if (!isoStr) return null;
+  try {
+    const d = new Date(isoStr + 'T00:00:00');
+    return d.toLocaleDateString('en-CA', { year: 'numeric', month: 'long', day: 'numeric' });
+  } catch {
+    return isoStr;
+  }
+}
+
+/* ==============================================================
+   STATE HELPERS
+   ============================================================== */
+
+/**
+ * getEffectiveValue(field)
+ *
+ * Returns the resolved value for a PDF-sourced field following
+ * the data priority rules:
+ *   1. Manual override (state.overrides)
+ *   2. PDF extracted value (state.pdfData)
+ *   3. null
+ */
+function getEffectiveValue(field) {
+  if (state.overrides[field] !== undefined) return state.overrides[field];
+  if (state.pdfData[field]   !== undefined && state.pdfData[field] !== null) return state.pdfData[field];
+  return null;
+}
+
+/**
+ * getValueSource(field)
+ * Returns 'override', 'pdf', or null.
+ */
+function getValueSource(field) {
+  if (state.overrides[field] !== undefined) return 'override';
+  if (state.pdfData[field]   !== undefined && state.pdfData[field] !== null) return 'pdf';
+  return null;
+}
+
+/* ==============================================================
+   UI RENDERING
+   ============================================================== */
+
+/**
+ * Source badge HTML for a given source string.
+ */
+function badgeHTML(source) {
+  const map = { pdf: 'badge-pdf', manual: 'badge-manual', derived: 'badge-derived', override: 'badge-override' };
+  const cls = map[source] || 'badge-manual';
+  return `<span class="badge ${cls}">${source}</span>`;
+}
+
+/**
+ * renderExtractedField(fieldId, value, source, formatter)
+ *
+ * Updates the display of one PDF-extracted field in the UI.
+ * Shows the value, its source badge, and an Override button.
+ * If value is null, shows a prompt to enter manually.
+ */
+function renderExtractedField(fieldId, value, source, formatter) {
+  const el = document.getElementById(`disp-${fieldId}`);
+  if (!el) return;
+
+  const formatted = (formatter && value !== null) ? formatter(value)
+                  : (value !== null ? String(value) : null);
+
+  if (formatted) {
+    el.classList.remove('empty');
+    el.querySelector('.fd-value').innerHTML = formatted;
+    el.querySelector('.fd-actions').innerHTML =
+      `${badgeHTML(source)}
+       <button class="btn-ghost" onclick="openModal('${fieldId}')">Override</button>`;
+  } else {
+    el.classList.add('empty');
+    el.querySelector('.fd-value').innerHTML =
+      `Not extracted &mdash; <a href="#" style="color:var(--c-primary);"
+         onclick="openModal('${fieldId}'); return false;">enter manually</a>`;
+    el.querySelector('.fd-actions').innerHTML =
+      `<button class="btn-ghost" onclick="openModal('${fieldId}')">Enter</button>`;
+  }
+}
+
+/**
+ * updateAllExtractedFields()
+ * Re-renders every extracted field from current state.
+ */
+function updateAllExtractedFields() {
+  const fields = [
+    { id: 'employee_name',           fmt: null },
+    { id: 'start_date',              fmt: formatDate },
+    { id: 'end_date',                fmt: formatDate },
+    { id: 'vacation_days_accrued',   fmt: v => `${fmtNum(v,1)} days` },
+    { id: 'roll_over_days',          fmt: v => `${fmtNum(v,1)} days` },
+    { id: 'vacation_days_used',      fmt: v => `${fmtNum(v,1)} days` },
+    { id: 'vacation_days_remaining', fmt: v => `${fmtNum(v,1)} days` },
+    { id: 'renewal_date',            fmt: formatDate },
+  ];
+  for (const { id, fmt } of fields) {
+    renderExtractedField(id, getEffectiveValue(id), getValueSource(id), fmt);
+  }
+}
+
+/**
+ * renderWarnings(issues)
+ * Shows or hides the validation warnings card.
+ */
+function renderWarnings(issues) {
+  const card = document.getElementById('card-warnings');
+  const list = document.getElementById('warnList');
+
+  if (!issues.length) { card.classList.add('hidden'); return; }
+
+  card.classList.remove('hidden');
+  list.innerHTML = issues.map(i => `
+    <div class="warn-item ${i.type === 'error' ? 'wi-error' : 'wi-warn'}">
+      <span class="wi-icon">${i.type === 'error' ? '🚫' : '⚠️'}</span>
+      <span>${i.message}</span>
+    </div>`).join('');
+}
+
+/**
+ * renderResults(r)
+ * Renders the full payment breakdown table and audit trail.
+ *
+ * @param {Object} r - Resolved calculation results object.
+ */
+function renderResults(r) {
+  document.getElementById('card-results').classList.remove('hidden');
+
+  const today = new Date().toLocaleDateString('en-CA',
+    { year: 'numeric', month: 'long', day: 'numeric' });
+
+  document.getElementById('resultBody').innerHTML = `
+
+    <div style="margin-bottom:18px;">
+      <div style="font-size:18px; font-weight:700; margin-bottom:2px;">${r.employeeName || 'N/A'}</div>
+      <div class="text-muted" style="font-size:13px;">
+        Last day of work: <strong>${r.lastDayFormatted || '—'}</strong>
+        &nbsp;&middot;&nbsp; Calculated on: ${today}
+      </div>
+    </div>
+
+    <table class="res-table">
+      <thead>
+        <tr>
+          <th>Item</th>
+          <th>Calculation Detail</th>
+          <th style="text-align:right;">Amount (CAD)</th>
+          <th style="text-align:center;">Source</th>
+        </tr>
+      </thead>
+      <tbody>
+
+        <!-- Payroll Basis -->
+        <tr class="tr-group"><td colspan="4">Payroll Basis</td></tr>
+        <tr>
+          <td class="td-label">Monthly Salary</td>
+          <td></td>
+          <td class="td-amount">${formatCurrencyCAD(r.salary)}</td>
+          <td class="td-source">${badgeHTML('manual')}</td>
+        </tr>
+        <tr>
+          <td class="td-label">Working Days in Month</td>
+          <td>${r.workingDays} days</td>
+          <td class="td-amount"></td>
+          <td class="td-source">${badgeHTML('manual')}</td>
+        </tr>
+        <tr>
+          <td class="td-label">Daily Rate</td>
+          <td>${formatCurrencyCAD(r.salary)} ÷ ${r.workingDays} days</td>
+          <td class="td-amount">${formatCurrencyCAD(r.dailyRate)}/day</td>
+          <td class="td-source">${badgeHTML('derived')}</td>
+        </tr>
+
+        <!-- Final Period Worked -->
+        <tr class="tr-group"><td colspan="4">Final Period Worked</td></tr>
+        <tr>
+          <td class="td-label">Worked Days Value</td>
+          <td>${r.workedDays} days × ${formatCurrencyCAD(r.dailyRate)}</td>
+          <td class="td-amount">${formatCurrencyCAD(r.workedDaysValue)}</td>
+          <td class="td-source">${badgeHTML('manual')}</td>
+        </tr>
+
+        <!-- Pay in Lieu of Notice -->
+        <tr class="tr-group"><td colspan="4">Pay in Lieu of Notice</td></tr>
+        <tr>
+          <td class="td-label">Pay in Lieu Applicable</td>
+          <td>${r.payInLieu
+                ? `Yes &mdash; ${NOTICE_WORKING_DAYS} working days × ${formatCurrencyCAD(r.dailyRate)}`
+                : 'No &mdash; not applicable'}</td>
+          <td class="td-amount">${formatCurrencyCAD(r.payInLieuValue)}</td>
+          <td class="td-source">${badgeHTML('manual')}</td>
+        </tr>
+
+        <!-- Vacation Payout -->
+        <tr class="tr-group"><td colspan="4">Vacation Payout</td></tr>
+        <tr>
+          <td class="td-label">Vacation Days Accrued (Allocated)</td>
+          <td>${fmtNum(r.vacationAccrued, 1)} days</td>
+          <td class="td-amount"></td>
+          <td class="td-source">${badgeHTML(r.sources.vacation_days_accrued)}</td>
+        </tr>
+        <tr>
+          <td class="td-label">Roll Over Days</td>
+          <td>${fmtNum(r.rollOver, 1)} days</td>
+          <td class="td-amount"></td>
+          <td class="td-source">${badgeHTML(r.sources.roll_over_days)}</td>
+        </tr>
+        <tr>
+          <td class="td-label">Vacation Days Used</td>
+          <td>${fmtNum(r.vacationUsed, 1)} days</td>
+          <td class="td-amount"></td>
+          <td class="td-source">${badgeHTML(r.sources.vacation_days_used)}</td>
+        </tr>
+        <tr>
+          <td class="td-label">Vacation Days Remaining</td>
+          <td>${fmtNum(r.vacationRemaining, 1)} days × ${formatCurrencyCAD(r.dailyRate)}</td>
+          <td class="td-amount">${formatCurrencyCAD(r.vacationPayout)}</td>
+          <td class="td-source">${badgeHTML(r.sources.vacation_days_remaining)}</td>
+        </tr>
+
+        <!-- TOTAL -->
+        <tr class="tr-total">
+          <td colspan="2">TOTAL FINAL PAYMENT</td>
+          <td class="td-amount">${formatCurrencyCAD(r.finalPayment)}</td>
+          <td></td>
+        </tr>
+
+      </tbody>
+    </table>
+
+    <!-- Audit Trail -->
+    <div class="audit-box">
+      <strong>Calculation Audit Trail</strong><br>
+      daily_rate&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= ${formatCurrencyCAD(r.salary)} ÷ ${r.workingDays} = <strong>${formatCurrencyCAD(r.dailyRate)}</strong><br>
+      worked_days_value = ${r.workedDays} × ${formatCurrencyCAD(r.dailyRate)} = <strong>${formatCurrencyCAD(r.workedDaysValue)}</strong><br>
+      pay_in_lieu_value = ${r.payInLieu ? `${NOTICE_WORKING_DAYS} × ${formatCurrencyCAD(r.dailyRate)}` : '0 (not applicable)'} = <strong>${formatCurrencyCAD(r.payInLieuValue)}</strong><br>
+      vacation_payout&nbsp;&nbsp;= ${fmtNum(r.vacationRemaining,1)} days × ${formatCurrencyCAD(r.dailyRate)} = <strong>${formatCurrencyCAD(r.vacationPayout)}</strong><br>
+      ─────────────────────────────────────────────<br>
+      final_payment&nbsp;&nbsp;&nbsp;&nbsp;= ${formatCurrencyCAD(r.workedDaysValue)} + ${formatCurrencyCAD(r.payInLieuValue)} + ${formatCurrencyCAD(r.vacationPayout)} = <strong>${formatCurrencyCAD(r.finalPayment)}</strong>
+    </div>
+
+    ${r.notes ? `
+    <div style="margin-top:14px; padding:12px 14px; background:#f9fafb;
+                border:1px solid var(--c-border); border-radius:7px; font-size:13px;">
+      <strong>Notes:</strong> ${r.notes}
+    </div>` : ''}
+  `;
+}
+
+/* ==============================================================
+   MAIN CALCULATE FUNCTION
+   ============================================================== */
+
+/**
+ * calculate()
+ *
+ * Orchestrates the full calculation pipeline:
+ *  1. Reads all current UI values (manual inputs + resolved PDF fields)
+ *  2. Runs validateInputs() — renders warnings, blocks on errors
+ *  3. Runs the calculation engine (pure functions)
+ *  4. Calls renderResults() with the final numbers
+ *
+ * IMPORTANT: All calculations use ONLY the values visible in the UI.
+ * No hidden data is used.
+ */
+function calculate() {
+  /* ---- 1. Read manual inputs ---- */
+  const salary      = getSalaryValue() || null;
+  const lastDay     = document.getElementById('inp-last_day').value                 || null;
+  const workedDays  = parseFloat(document.getElementById('inp-worked_days').value);
+  const workingDays = parseFloat(document.getElementById('inp-working_days').value) || null;
+  const payInLieu   = document.getElementById('inp-pay_in_lieu').checked;
+  const notes       = document.getElementById('inp-notes').value.trim();
+
+  /* ---- 2. Read resolved PDF/override fields ---- */
+  const vAccrued   = getEffectiveValue('vacation_days_accrued');
+  const vRollOver  = getEffectiveValue('roll_over_days');
+  const vUsed      = getEffectiveValue('vacation_days_used');
+  const vRemPdf    = getEffectiveValue('vacation_days_remaining');
+
+  // Cast numeric PDF values
+  const nAccrued  = vAccrued  !== null ? parseFloat(vAccrued)  : null;
+  const nRollOver = vRollOver !== null ? parseFloat(vRollOver) : null;
+  const nUsed     = vUsed     !== null ? parseFloat(vUsed)     : null;
+  const nRemPdf   = vRemPdf   !== null ? parseFloat(vRemPdf)   : null;
+
+  /* ---- 3. Validate ---- */
+  const issues = validateInputs({
+    salary, working_days: workingDays,
+    worked_days: isNaN(workedDays) ? null : workedDays,
+    vacation_days_accrued: nAccrued,
+    roll_over_days:        nRollOver,
+    vacation_days_used:    nUsed,
+    vacation_days_remaining: nRemPdf,
+  });
+
+  renderWarnings(issues);
+
+  if (issues.some(i => i.type === 'error')) {
+    document.getElementById('card-results').classList.add('hidden');
+    return;
+  }
+
+  /* ---- 4. Run calculation engine ---- */
+  const dailyRate       = calculateDailyRate(salary, workingDays);
+  const workedDaysValue = calculateWorkedDaysValue(isNaN(workedDays) ? 0 : workedDays, dailyRate);
+  const payInLieuValue  = calculatePayInLieu(dailyRate, payInLieu);
+
+  const { value: vacationRemaining, source: vRemSource } =
+    deriveVacationRemaining(nAccrued, nRollOver, nUsed, nRemPdf);
+
+  const vacationPayout  = calculateVacationPayout(vacationRemaining, dailyRate);
+  const finalPayment    = calculateFinalPayment(workedDaysValue, payInLieuValue, vacationPayout);
+
+  /* ---- 5. Build sources map ---- */
+  const sources = {
+    vacation_days_accrued:   getValueSource('vacation_days_accrued')   || 'manual',
+    roll_over_days:          getValueSource('roll_over_days')          || 'manual',
+    vacation_days_used:      getValueSource('vacation_days_used')      || 'manual',
+    vacation_days_remaining: vRemSource,
+  };
+
+  /* ---- 6. Render ---- */
+  renderResults({
+    employeeName:     getEffectiveValue('employee_name') || 'N/A',
+    lastDayFormatted: formatDate(lastDay),
+    salary,
+    workingDays,
+    dailyRate,
+    workedDays:       isNaN(workedDays) ? 0 : workedDays,
+    workedDaysValue,
+    payInLieu,
+    payInLieuValue,
+    vacationAccrued:  nAccrued,
+    rollOver:         nRollOver,
+    vacationUsed:     nUsed,
+    vacationRemaining,
+    vacationPayout,
+    finalPayment,
+    sources,
+    notes,
+  });
+
+  state.calculated = true;
+  document.getElementById('btn-calc').textContent = '↺ Recalculate';
+  document.getElementById('card-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/* ==============================================================
+   OVERRIDE MODAL
+   ============================================================== */
+
+const FIELD_META = {
+  employee_name:           { label: 'Employee Name',           type: 'text',   hint: 'Full name as it appears in records.' },
+  start_date:              { label: 'Start Date',              type: 'date',   hint: 'Employment start date (YYYY-MM-DD).' },
+  end_date:                { label: 'End Date',                type: 'date',   hint: 'Employment end / termination date (YYYY-MM-DD).' },
+  vacation_days_accrued:   { label: 'Allocated Vacation Days', type: 'number', hint: 'Total vacation days allocated for this period (e.g. 15).' },
+  roll_over_days:          { label: 'Roll Over Days',          type: 'number', hint: 'Days carried over from the previous period (0 if none).' },
+  vacation_days_used:      { label: 'Vacation Days Used',      type: 'number', hint: 'Days already taken during this period.' },
+  vacation_days_remaining: { label: 'Vacation Days Remaining', type: 'number', hint: 'Remaining days; overrides the derived value.' },
+  renewal_date:            { label: 'Renewal Date',            type: 'date',   hint: 'Vacation anniversary / renewal date (YYYY-MM-DD).' },
+};
+
+function openModal(fieldId) {
+  activeOverrideField = fieldId;
+  const meta = FIELD_META[fieldId] || { label: fieldId, type: 'text', hint: '' };
+
+  document.getElementById('modal-title').textContent = `Override: ${meta.label}`;
+  document.getElementById('modal-hint').textContent  = meta.hint;
+  document.getElementById('modal-label').textContent = meta.label;
+
+  const inp = document.getElementById('modal-input');
+  inp.type  = meta.type === 'number' ? 'number' : (meta.type === 'date' ? 'text' : 'text');
+  inp.step  = meta.type === 'number' ? '0.5' : undefined;
+  inp.placeholder = meta.type === 'number' ? 'e.g. 8' : (meta.type === 'date' ? 'YYYY-MM-DD' : '');
+
+  // Pre-fill with current effective value
+  const current = getEffectiveValue(fieldId);
+  inp.value = current !== null ? String(current) : '';
+
+  // Show "Clear Override" only if an override exists
+  document.getElementById('modal-clear-btn').style.display =
+    state.overrides[fieldId] !== undefined ? 'inline-flex' : 'none';
+
+  document.getElementById('overrideModal').style.display = 'flex';
+  setTimeout(() => inp.focus(), 50);
+}
+
+function confirmOverride() {
+  if (!activeOverrideField) return;
+  const inp   = document.getElementById('modal-input');
+  const raw   = inp.value.trim();
+  if (!raw) { closeModal(); return; }
+
+  const meta  = FIELD_META[activeOverrideField];
+  let value   = raw;
+
+  if (meta && meta.type === 'number') {
+    value = parseFloat(raw);
+    if (isNaN(value)) { alert('Please enter a valid number.'); return; }
+  }
+
+  state.overrides[activeOverrideField] = value;
+  updateAllExtractedFields();
+  closeModal();
+  if (state.calculated) calculate();   // Auto-recalculate after override
+}
+
+function clearOverride() {
+  if (!activeOverrideField) return;
+  delete state.overrides[activeOverrideField];
+  updateAllExtractedFields();
+  closeModal();
+  if (state.calculated) calculate();
+}
+
+function closeModal() {
+  document.getElementById('overrideModal').style.display = 'none';
+  activeOverrideField = null;
+}
+
+// Close modal on backdrop click or Escape key
+document.getElementById('overrideModal').addEventListener('click', e => {
+  if (e.target.id === 'overrideModal') closeModal();
+});
+document.addEventListener('keydown', e => {
+  if (!activeOverrideField) return;
+  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Enter')  confirmOverride();
+});
+
+/* ==============================================================
+   PDF UPLOAD HANDLERS
+   ============================================================== */
+
+function setupUpload() {
+  const zone  = document.getElementById('uploadZone');
+  const input = document.getElementById('pdfFileInput');
+  if (!zone || !input) return;
+
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f && f.type === 'application/pdf') {
+      handlePdfFile(f);
+    } else {
+      showPdfStatus('Please upload a valid PDF file.', 'error');
+    }
+  });
+
+  input.addEventListener('change', e => {
+    if (e.target.files[0]) handlePdfFile(e.target.files[0]);
+  });
+}
+
+function showPdfStatus(msg, type = 'info') {
+  const icons = { info: 'ℹ️', success: '✅', processing: '⏳', error: '❌' };
+  const cls   = { info: 'status-info', success: 'status-success', processing: 'status-warn', error: 'status-error' };
+  document.getElementById('pdfStatus').innerHTML = `
+    <div class="status-bar ${cls[type] || 'status-info'}">
+      <span class="sb-icon">${icons[type] || 'ℹ️'}</span>
+      <span>${msg}</span>
+    </div>`;
+}
+
+/* ==============================================================
+   BACKEND API
+   server.py must be running: python3 server.py
+   ============================================================== */
+
+const BACKEND_URL = 'http://localhost:5050';
+
+/**
+ * tryBackendParse(file)
+ * Sends the PDF to the Python/Flask backend (server.py).
+ * Returns normalized data object on success, null if backend unavailable.
+ */
+async function tryBackendParse(file) {
+  const form = new FormData();
+  form.append('pdf', file);
+  const resp = await fetch(`${BACKEND_URL}/api/parse-pdf`, {
+    method: 'POST', body: form,
+    signal: AbortSignal.timeout(15000)   // 15-second timeout
+  });
+  if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+  const json = await resp.json();
+  if (!json.success) throw new Error(json.error || 'Unknown server error');
+
+  // Store raw text and tables for verification
+  state.pdfRawText = json.raw_text || '';
+  state.pdfRawTables = json.raw_tables || '';
+  state.debugInfo = json.debug || {};
+
+  // Map server response to the same normalized shape the UI expects
+  return {
+    employee_name:           json.employee_name           ?? null,
+    start_date:              json.start_date              ?? null,
+    end_date:                json.end_date                ?? null,
+    vacation_days_accrued:   json.vacation_days_accrued   ?? null,
+    roll_over_days:          json.roll_over_days          ?? null,
+    vacation_days_used:      json.vacation_days_used      ?? null,
+    vacation_days_remaining: json.vacation_days_remaining ?? null,
+    renewal_date:            json.renewal_date            ?? null,
+  };
+}
+
+async function handlePdfFile(file) {
+  showPdfStatus(`Processing "<strong>${file.name}</strong>" (${(file.size/1024).toFixed(1)} KB)…`, 'processing');
+
+  // Update upload zone to show selected file
+  document.getElementById('uploadZone').innerHTML = `
+    <div class="uz-icon">✅</div>
+    <p class="uz-title">${file.name}</p>
+    <p class="uz-sub">${(file.size/1024).toFixed(1)} KB &middot; Click to upload a different file</p>
+    <input type="file" id="pdfFileInput" accept=".pdf">
+  `;
+  document.getElementById('pdfFileInput').addEventListener('change', e => {
+    if (e.target.files[0]) handlePdfFile(e.target.files[0]);
+  });
+
+  let data   = null;
+  let source = '';
+
+  try {
+    // ── Try Python backend first (pdfplumber — more reliable) ──────────────
+    data   = await tryBackendParse(file);
+    source = 'backend';
+  } catch (backendErr) {
+    // Backend not running or failed — fall back to client-side PDF.js
+    console.warn('Backend unavailable, using client-side parser:', backendErr.message);
+    try {
+      data   = await parseVacationPdf(file);
+      source = 'client';
+    } catch (clientErr) {
+      console.error('Client-side PDF parse error:', clientErr);
+      showPdfStatus(
+        `Could not read this PDF: ${clientErr.message}. If it is a scanned document, text extraction is not supported — please enter values manually.`,
+        'error'
+      );
+      return;
+    }
+  }
+
+  state.pdfData = data;
+
+  // Show raw text / tables for user verification
+  const rawEl = document.getElementById('rawTextEl');
+  if (state.pdfRawTables) {
+    rawEl.textContent =
+      '─── TABLES ───\n' + state.pdfRawTables +
+      '\n\n─── FULL TEXT ───\n' + (state.pdfRawText || '');
+  } else {
+    rawEl.textContent = state.pdfRawText || '(No text could be extracted)';
+  }
+  document.getElementById('rawTextContainer').classList.remove('hidden');
+
+  const found = Object.values(data).filter(v => v !== null).length;
+  const total = Object.keys(data).length;
+  const method = source === 'backend'
+    ? '🐍 Python/pdfplumber backend'
+    : '🌐 Browser PDF.js (backend not running)';
+
+  showPdfStatus(
+    `Extraction complete &mdash; found <strong>${found} of ${total}</strong> fields
+     &nbsp;<span style="font-size:11px;opacity:0.7;">(${method})</span>.
+     Review below and override any incorrect values.`,
+    found > 0 ? 'success' : 'processing'
+  );
+
+  if (found === 0) {
+    const note = document.getElementById('extractionNote');
+    note.classList.remove('hidden');
+    note.innerHTML = `<div class="status-bar status-warn mt-8">
+      <span class="sb-icon">⚠️</span>
+      <span>No fields were automatically extracted. This may be a scanned/image PDF.
+      Enter values manually using the Override buttons.</span></div>`;
+  }
+
+  updateAllExtractedFields();
+  document.getElementById('badge-upload').textContent = '✓';
+  document.getElementById('badge-upload').classList.add('done');
+}
+
+/* ==============================================================
+   RESET
+   ============================================================== */
+
+/**
+ * resetAll()
+ * Resets every piece of state and returns the UI to its initial state.
+ */
+function resetAll() {
+  if (!confirm('Reset all inputs and results? This cannot be undone.')) return;
+
+  state.pdfData    = {};
+  state.overrides  = {};
+  state.pdfRawText   = '';
+  state.pdfRawTables = '';
+  state.debugInfo    = {};
+  state.calculated = false;
+
+  // Rebuild upload zone
+  document.getElementById('uploadZone').innerHTML = `
+    <div class="uz-icon">📄</div>
+    <p class="uz-title">Click to upload or drag &amp; drop</p>
+    <p class="uz-sub">PDF files only &middot; Text-based (non-scanned) PDFs work best</p>
+    <input type="file" id="pdfFileInput" accept=".pdf">
+  `;
+  setupUpload();
+
+  document.getElementById('pdfStatus').innerHTML      = '';
+  document.getElementById('rawTextContainer').classList.add('hidden');
+  document.getElementById('extractionNote').classList.add('hidden');
+  document.getElementById('badge-upload').textContent = '1';
+  document.getElementById('badge-upload').classList.remove('done');
+
+  // Reset manual inputs
+  _salaryCents = 0;
+  ['inp-salary','inp-last_day','inp-worked_days','inp-working_days','inp-notes']
+    .forEach(id => { document.getElementById(id).value = ''; });
+  document.getElementById('inp-pay_in_lieu').checked = false;
+  document.getElementById('daily-rate-preview').classList.add('hidden');
+
+  // Reset display fields
+  updateAllExtractedFields();
+
+  // Hide result panels
+  document.getElementById('card-results').classList.add('hidden');
+  document.getElementById('card-warnings').classList.add('hidden');
+  document.getElementById('btn-calc').textContent = 'Calculate Final Payment';
+}
+
+function toggleRawText() {
+  const pre = document.getElementById('rawTextEl');
+  const btn = document.querySelector('.raw-toggle');
+  const showing = pre.style.display === 'block';
+  pre.style.display  = showing ? 'none'  : 'block';
+  btn.textContent    = showing
+    ? 'Show extracted raw text (for verification)'
+    : 'Hide extracted raw text';
+}
+
+/* ==============================================================
+   CURRENCY INPUT  (salary field)
+   ============================================================== */
+
+/**
+ * Salary is stored internally as an integer number of cents.
+ * Every digit the user types shifts the decimal two places to the left,
+ * exactly like an ATM or payroll system.
+ *
+ * Examples:
+ *   Type  1,2,0,5,3,5,0  →  $12,053.50   ✓  (no decimal needed)
+ *   Type  5,0,0,0,0,0    →  $5,000.00    ✓
+ *   Paste "12053.50"     →  $12,053.50   ✓
+ *   Backspace            →  removes the last digit (shifts right)
+ */
+let _salaryCents = 0;
+
+/** Returns the current salary as a floating-point dollar amount. */
+function getSalaryValue() {
+  return _salaryCents / 100;
+}
+
+function _formatSalaryCents(cents) {
+  if (!cents) return '';
+  return new Intl.NumberFormat('en-CA', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(cents / 100);
+}
+
+function initSalaryInput() {
+  const input = document.getElementById('inp-salary');
+
+  input.addEventListener('keydown', (e) => {
+    // Digit → append to cents (shift decimal left)
+    if (e.key >= '0' && e.key <= '9') {
+      e.preventDefault();
+      if (_salaryCents < 9_999_999_99) {           // cap at $99,999,999.99
+        _salaryCents = _salaryCents * 10 + parseInt(e.key, 10);
+      }
+      input.value = _formatSalaryCents(_salaryCents);
+      updateDailyRate();
+      return;
+    }
+    // Backspace → remove last digit (shift decimal right)
+    if (e.key === 'Backspace') {
+      e.preventDefault();
+      _salaryCents = Math.floor(_salaryCents / 10);
+      input.value = _salaryCents > 0 ? _formatSalaryCents(_salaryCents) : '';
+      updateDailyRate();
+      return;
+    }
+    // Delete → clear entirely
+    if (e.key === 'Delete') {
+      e.preventDefault();
+      _salaryCents = 0;
+      input.value = '';
+      updateDailyRate();
+      return;
+    }
+    // Allow navigation/tab; block everything else (decimal, letters, etc.)
+    if (!['Tab','Escape','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(e.key)) {
+      e.preventDefault();
+    }
+  });
+
+  // Handle paste — accept "12053.50", "12,053.50", "$12053.50", "1205350"
+  input.addEventListener('paste', (e) => {
+    e.preventDefault();
+    const raw = (e.clipboardData || window.clipboardData).getData('text');
+    // Strip currency symbols, spaces, commas
+    const cleaned = raw.replace(/[$,\s]/g, '');
+    const val = parseFloat(cleaned);
+    if (!isNaN(val) && val > 0) {
+      _salaryCents = Math.round(val * 100);
+      input.value = _formatSalaryCents(_salaryCents);
+      updateDailyRate();
+    }
+  });
+}
+
+/* ==============================================================
+   LIVE DAILY RATE PREVIEW
+   ============================================================== */
+
+/**
+ * updateDailyRate()
+ *
+ * Called every time salary or working-days inputs change.
+ * Computes daily_rate = salary / working_days_in_month and shows
+ * the full formula inline so the user can verify before calculating.
+ *
+ * Formula displayed:  $5,500.00 ÷ 21 days = $261.90 / day
+ */
+function updateDailyRate() {
+  const salary      = getSalaryValue();
+  const workingDays = parseFloat(document.getElementById('inp-working_days').value);
+  const preview     = document.getElementById('daily-rate-preview');
+
+  if (!salary || salary <= 0 || !workingDays || workingDays <= 0) {
+    preview.classList.add('hidden');
+    return;
+  }
+
+  const dailyRate = salary / workingDays;   // daily_rate = salary / working_days_in_month
+
+  document.getElementById('dr-salary').textContent = formatCurrencyCAD(salary);
+  document.getElementById('dr-days').textContent   = workingDays;
+  document.getElementById('dr-result').textContent = formatCurrencyCAD(dailyRate) + ' / day';
+
+  preview.classList.remove('hidden');
+}
+
+/* ==============================================================
+   INITIALISE
+   ============================================================== */
+setupUpload();
+updateAllExtractedFields();
+initSalaryInput();
+
+</script>
+</body>
+</html>
