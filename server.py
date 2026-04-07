@@ -27,16 +27,17 @@ API:
 
 import re
 import io
+import os
 import logging
 from datetime import datetime
 
 import pdfplumber
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
 # ─────────────────────────────────────────────────────────────────────────────
-app = Flask(__name__)
-CORS(app)                          # allow the HTML file to call this server
+app = Flask(__name__, static_folder=".", static_url_path="")
+CORS(app)
 logging.basicConfig(level=logging.INFO)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -607,6 +608,12 @@ def extract_pdf(file_bytes: bytes) -> dict:
 # FLASK ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 
+@app.route("/")
+def index():
+    """Serve the frontend — works both locally and on Render."""
+    return send_file(os.path.join(os.path.dirname(__file__), "index.html"))
+
+
 @app.route("/api/parse-pdf", methods=["POST"])
 def parse_pdf():
     if "pdf" not in request.files:
@@ -633,8 +640,7 @@ def health():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  Vacation Calculator — PDF Extraction Server")
-    print("  http://localhost:5050")
+    print("  Vacation Calculator — running at http://localhost:5050")
     print("  Press Ctrl+C to stop")
     print("=" * 60)
     app.run(host="127.0.0.1", port=5050, debug=False)

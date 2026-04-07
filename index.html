@@ -1839,7 +1839,12 @@ function showPdfStatus(msg, type = 'info') {
    server.py must be running: python3 server.py
    ============================================================== */
 
-const BACKEND_URL = 'http://localhost:5050';
+// Auto-detect backend URL:
+// - Served by Flask (production / Render) → same origin, no port needed
+// - Opened as a local file (file://) → hit localhost:5050
+const BACKEND_URL = window.location.protocol === 'file:'
+  ? 'http://localhost:5050'
+  : window.location.origin;
 
 /**
  * tryBackendParse(file)
