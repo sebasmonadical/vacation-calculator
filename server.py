@@ -608,10 +608,11 @@ def extract_pdf(file_bytes: bytes) -> dict:
 # FLASK ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 @app.route("/")
 def index():
-    """Serve the frontend — works both locally and on Render."""
-    return send_file(os.path.join(os.path.dirname(__file__), "index.html"))
+    return send_file(os.path.join(BASE_DIR, "index.html"))
 
 
 @app.route("/api/parse-pdf", methods=["POST"])
