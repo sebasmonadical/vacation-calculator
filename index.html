@@ -342,6 +342,7 @@
     }
     .warn-item.wi-warn  { background: var(--c-warn-bg);  border: 1px solid var(--c-warn-border);  color: var(--c-warn-text); }
     .warn-item.wi-error { background: var(--c-error-bg); border: 1px solid var(--c-error-border); color: var(--c-error-text); }
+    .warn-item.wi-info  { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
     .warn-item .wi-icon { flex-shrink: 0; }
 
     /* ============================================================
@@ -1251,13 +1252,13 @@ function validateInputs(data) {
         message: `Vacation used (${vacation_days_used} days) exceeds total available (${available} days). Verify this is correct.` });
   }
 
-  // Warn if derived remaining doesn't match PDF remaining
+  // Info: show what the PDF stated vs what was calculated, if they differ
   if (vacation_days_remaining !== null &&
       vacation_days_accrued !== null) {
     const derived = (vacation_days_accrued || 0) + (roll_over_days || 0) - (vacation_days_used || 0);
     if (Math.abs(derived - vacation_days_remaining) > 0.01) {
-      issues.push({ type: 'warn',
-        message: `PDF remaining (${vacation_days_remaining} days) differs from calculated remaining (${derived.toFixed(1)} days = ${vacation_days_accrued} accrued + ${roll_over_days || 0} rollover − ${vacation_days_used || 0} used). The PDF value takes priority.` });
+      issues.push({ type: 'info',
+        message: `PDF reported ${vacation_days_remaining} remaining days, but the calculated value (${vacation_days_accrued} allocated + ${roll_over_days || 0} rollover − ${vacation_days_used || 0} used = ${derived.toFixed(1)} days) is used for the payout.` });
     }
   }
 
@@ -1305,16 +1306,15 @@ function calculatePayInLieu(dailyRate, applies) {
 /**
  * deriveVacationRemaining(accrued, rollOver, used, fromPdf)
  *
- * Priority: PDF value (if present) > derived value.
+ * Always derived: allocated + roll_over − used.
+ * The PDF "days remaining" field is ignored — it may reflect a different
+ * cutoff date and leads to incorrect payouts.
  *
  * Derived formula: vacation_days_remaining = accrued + roll_over − used
  *
  * @return {{ value: number, source: string }}
  */
 function deriveVacationRemaining(accrued, rollOver, used, fromPdf) {
-  if (fromPdf !== null && fromPdf !== undefined) {
-    return { value: fromPdf, source: 'pdf' };
-  }
   const value = (accrued || 0) + (rollOver || 0) - (used || 0);
   return { value, source: 'derived' };
 }
@@ -1478,8 +1478,8 @@ function renderWarnings(issues) {
 
   card.classList.remove('hidden');
   list.innerHTML = issues.map(i => `
-    <div class="warn-item ${i.type === 'error' ? 'wi-error' : 'wi-warn'}">
-      <span class="wi-icon">${i.type === 'error' ? '🚫' : '⚠️'}</span>
+    <div class="warn-item ${i.type === 'error' ? 'wi-error' : i.type === 'info' ? 'wi-info' : 'wi-warn'}">
+      <span class="wi-icon">${i.type === 'error' ? '🚫' : i.type === 'info' ? 'ℹ️' : '⚠️'}</span>
       <span>${i.message}</span>
     </div>`).join('');
 }
