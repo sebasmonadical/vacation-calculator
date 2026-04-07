@@ -1311,19 +1311,22 @@ function calculatePayInLieu(dailyRate, applies) {
 }
 
 /**
- * deriveVacationRemaining(accrued, rollOver, used, fromPdf)
+ * deriveVacationRemaining(accrued, rollOver, used, fromPdf, totalOverride)
  *
- * Always derived: allocated + roll_over − used.
- * The PDF "days remaining" field is ignored — it may reflect a different
- * cutoff date and leads to incorrect payouts.
+ * Always derived: total − used, where total = accrued + rollOver.
+ * If totalOverride is set (user overrode Total Vacation Days), use that as total.
+ * The PDF "days remaining" field is ignored — it may reflect a different cutoff date.
  *
- * Derived formula: vacation_days_remaining = accrued + roll_over − used
+ * Derived formula: vacation_days_remaining = total − used
  *
  * @return {{ value: number, source: string }}
  */
-function deriveVacationRemaining(accrued, rollOver, used, fromPdf) {
-  const value = (accrued || 0) + (rollOver || 0) - (used || 0);
-  return { value, source: 'derived' };
+function deriveVacationRemaining(accrued, rollOver, used, fromPdf, totalOverride) {
+  const total = totalOverride !== null && totalOverride !== undefined
+    ? totalOverride
+    : (accrued || 0) + (rollOver || 0);
+  const value = total - (used || 0);
+  return { value, source: totalOverride !== null && totalOverride !== undefined ? 'override' : 'derived' };
 }
 
 /**
@@ -1477,15 +1480,28 @@ function updateAllExtractedFields() {
 /**
  * updateTotalVacationDays()
  * Derived field: Total Vacation Days = Allocated Days + Roll Over Days.
- * Always computed — not extracted from PDF, not overridable.
+ * Supports manual override via the Override button.
  */
 function updateTotalVacationDays() {
   const el = document.getElementById('disp-total_vacation_days');
   if (!el) return;
+
+  const overrideVal = state.overrides['total_vacation_days'];
+  if (overrideVal !== undefined && overrideVal !== null) {
+    // User has overridden — show override value
+    el.classList.remove('empty');
+    el.querySelector('.fd-value').innerHTML = `${fmtNum(parseFloat(overrideVal), 1)} days`;
+    el.querySelector('.fd-actions').innerHTML =
+      `${badgeHTML('override')}
+       <button class="btn-ghost" onclick="openModal('total_vacation_days')">Override</button>`;
+    return;
+  }
+
   const accrued  = parseFloat(getEffectiveValue('vacation_days_accrued'));
   const rollOver = parseFloat(getEffectiveValue('roll_over_days'));
   const hasAccrued  = !isNaN(accrued);
   const hasRollOver = !isNaN(rollOver);
+
   if (hasAccrued || hasRollOver) {
     const total = (hasAccrued ? accrued : 0) + (hasRollOver ? rollOver : 0);
     const formula = `${hasAccrued ? fmtNum(accrued,1) : '0'} allocated + ${hasRollOver ? fmtNum(rollOver,1) : '0'} rollover`;
@@ -1493,11 +1509,15 @@ function updateTotalVacationDays() {
     el.querySelector('.fd-value').innerHTML = `${fmtNum(total,1)} days`;
     el.querySelector('.fd-actions').innerHTML =
       `<span style="font-size:11px;color:var(--c-muted);">${formula}</span>
-       ${badgeHTML('derived')}`;
+       ${badgeHTML('derived')}
+       <button class="btn-ghost" onclick="openModal('total_vacation_days')">Override</button>`;
   } else {
     el.classList.add('empty');
-    el.querySelector('.fd-value').innerHTML = '—';
-    el.querySelector('.fd-actions').innerHTML = '';
+    el.querySelector('.fd-value').innerHTML =
+      `Not extracted &mdash; <a href="#" style="color:var(--c-primary);"
+         onclick="openModal('total_vacation_days'); return false;">enter manually</a>`;
+    el.querySelector('.fd-actions').innerHTML =
+      `<button class="btn-ghost" onclick="openModal('total_vacation_days')">Enter</button>`;
   }
 }
 
@@ -1675,16 +1695,19 @@ function calculate() {
   const notes       = document.getElementById('inp-notes').value.trim();
 
   /* ---- 2. Read resolved PDF/override fields ---- */
-  const vAccrued   = getEffectiveValue('vacation_days_accrued');
-  const vRollOver  = getEffectiveValue('roll_over_days');
-  const vUsed      = getEffectiveValue('vacation_days_used');
-  const vRemPdf    = getEffectiveValue('vacation_days_remaining');
+  const vAccrued      = getEffectiveValue('vacation_days_accrued');
+  const vRollOver     = getEffectiveValue('roll_over_days');
+  const vUsed         = getEffectiveValue('vacation_days_used');
+  const vRemPdf       = getEffectiveValue('vacation_days_remaining');
+  const vTotalOverride = getEffectiveValue('total_vacation_days');
 
   // Cast numeric PDF values
   const nAccrued  = vAccrued  !== null ? parseFloat(vAccrued)  : null;
   const nRollOver = vRollOver !== null ? parseFloat(vRollOver) : null;
   const nUsed     = vUsed     !== null ? parseFloat(vUsed)     : null;
   const nRemPdf   = vRemPdf   !== null ? parseFloat(vRemPdf)   : null;
+  // If Total Vacation Days was overridden, split it back into accrued+rollover for remaining calc
+  const nTotalOverride = vTotalOverride !== null ? parseFloat(vTotalOverride) : null;
 
   /* ---- 3. Validate ---- */
   const issues = validateInputs({
@@ -1709,7 +1732,7 @@ function calculate() {
   const payInLieuValue  = calculatePayInLieu(dailyRate, payInLieu);
 
   const { value: vacationRemaining, source: vRemSource } =
-    deriveVacationRemaining(nAccrued, nRollOver, nUsed, nRemPdf);
+    deriveVacationRemaining(nAccrued, nRollOver, nUsed, nRemPdf, nTotalOverride);
 
   const vacationPayout  = calculateVacationPayout(vacationRemaining, dailyRate);
   const finalPayment    = calculateFinalPayment(workedDaysValue, payInLieuValue, vacationPayout);
@@ -1761,6 +1784,7 @@ const FIELD_META = {
   vacation_days_used:      { label: 'Vacation Days Used',      type: 'number', hint: 'Days already taken during this period.' },
   vacation_days_remaining: { label: 'Vacation Days Remaining', type: 'number', hint: 'Remaining days; overrides the derived value.' },
   renewal_date:            { label: 'Renewal Date',            type: 'date',   hint: 'Vacation anniversary / renewal date (YYYY-MM-DD).' },
+  total_vacation_days:     { label: 'Total Vacation Days',     type: 'number', hint: 'Total available days (allocated + rollover). Override only if you need to correct this value.' },
 };
 
 function openModal(fieldId) {
