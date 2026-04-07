@@ -1468,13 +1468,13 @@ function updateAllExtractedFields() {
     { id: 'vacation_days_accrued',   fmt: v => `${fmtNum(v,1)} days` },
     { id: 'roll_over_days',          fmt: v => `${fmtNum(v,1)} days` },
     { id: 'vacation_days_used',      fmt: v => `${fmtNum(v,1)} days` },
-    { id: 'vacation_days_remaining', fmt: v => `${fmtNum(v,1)} days` },
     { id: 'renewal_date',            fmt: formatDate },
   ];
   for (const { id, fmt } of fields) {
     renderExtractedField(id, getEffectiveValue(id), getValueSource(id), fmt);
   }
   updateTotalVacationDays();
+  updateVacationRemainingField();
 }
 
 /**
@@ -1518,6 +1518,71 @@ function updateTotalVacationDays() {
          onclick="openModal('total_vacation_days'); return false;">enter manually</a>`;
     el.querySelector('.fd-actions').innerHTML =
       `<button class="btn-ghost" onclick="openModal('total_vacation_days')">Enter</button>`;
+  }
+}
+
+/**
+ * updateVacationRemainingField()
+ * Smart renderer for Days Remaining:
+ *   1. Override (user manually set it)
+ *   2. PDF extracted value (if non-zero)
+ *   3. Derived: allocated + rollover − used
+ * Supports Override button in all states.
+ */
+function updateVacationRemainingField() {
+  const el = document.getElementById('disp-vacation_days_remaining');
+  if (!el) return;
+
+  const overrideVal = state.overrides['vacation_days_remaining'];
+  if (overrideVal !== undefined && overrideVal !== null) {
+    el.classList.remove('empty');
+    el.querySelector('.fd-value').innerHTML = `${fmtNum(parseFloat(overrideVal), 1)} days`;
+    el.querySelector('.fd-actions').innerHTML =
+      `${badgeHTML('override')}
+       <button class="btn-ghost" onclick="openModal('vacation_days_remaining')">Override</button>`;
+    return;
+  }
+
+  const pdfVal = state.pdfData['vacation_days_remaining'];
+  const nPdf   = pdfVal !== null && pdfVal !== undefined ? parseFloat(pdfVal) : null;
+  if (nPdf !== null && !isNaN(nPdf) && nPdf > 0) {
+    el.classList.remove('empty');
+    el.querySelector('.fd-value').innerHTML = `${fmtNum(nPdf, 1)} days`;
+    el.querySelector('.fd-actions').innerHTML =
+      `${badgeHTML('pdf')}
+       <button class="btn-ghost" onclick="openModal('vacation_days_remaining')">Override</button>`;
+    return;
+  }
+
+  // Derive: allocated + rollover − used
+  const accrued  = parseFloat(getEffectiveValue('vacation_days_accrued'));
+  const rollOver = parseFloat(getEffectiveValue('roll_over_days'));
+  const used     = parseFloat(getEffectiveValue('vacation_days_used'));
+  const totalOverride = parseFloat(getEffectiveValue('total_vacation_days'));
+
+  const total = !isNaN(totalOverride)
+    ? totalOverride
+    : (!isNaN(accrued) ? accrued : 0) + (!isNaN(rollOver) ? rollOver : 0);
+
+  if (!isNaN(accrued) || !isNaN(rollOver)) {
+    const remaining = total - (!isNaN(used) ? used : 0);
+    const formulaParts = [];
+    if (!isNaN(accrued))  formulaParts.push(`${fmtNum(accrued,1)} allocated`);
+    if (!isNaN(rollOver)) formulaParts.push(`${fmtNum(rollOver,1)} rollover`);
+    const formula = formulaParts.join(' + ') + ` − ${!isNaN(used) ? fmtNum(used,1) : '0'} used`;
+    el.classList.remove('empty');
+    el.querySelector('.fd-value').innerHTML = `${fmtNum(remaining, 1)} days`;
+    el.querySelector('.fd-actions').innerHTML =
+      `<span style="font-size:11px;color:var(--c-muted);">${formula}</span>
+       ${badgeHTML('derived')}
+       <button class="btn-ghost" onclick="openModal('vacation_days_remaining')">Override</button>`;
+  } else {
+    el.classList.add('empty');
+    el.querySelector('.fd-value').innerHTML =
+      `Not extracted &mdash; <a href="#" style="color:var(--c-primary);"
+         onclick="openModal('vacation_days_remaining'); return false;">enter manually</a>`;
+    el.querySelector('.fd-actions').innerHTML =
+      `<button class="btn-ghost" onclick="openModal('vacation_days_remaining')">Enter</button>`;
   }
 }
 
